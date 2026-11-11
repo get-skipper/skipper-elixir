@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "v*"
+  # Re-run after approving staged releases on hex.pm (already published packages are skipped).
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -22,13 +24,17 @@ jobs:
           otp-version: '29'
       - name: Copy README and LICENSE into each package
         run: for app in apps/*; do cp README.md LICENSE "$app/"; done
-      # skipper_core first: the adapters depend on it from Hex.
-      - name: Publish skipper_core
-        working-directory: apps/skipper_core
-        run: mix deps.get && mix hex.publish --yes
-      - name: Publish skipper_ex_unit
-        working-directory: apps/skipper_ex_unit
-        run: mix deps.get && mix hex.publish --yes
-      - name: Publish skipper_espec
-        working-directory: apps/skipper_espec
-        run: mix deps.get && mix hex.publish --yes
+      # skipper_core first: the adapters depend on it from Hex. Hex may stage a
+      # release for approval in the dashboard; the adapters then wait for it.
+      - name: Publish packages
+        run: |
+          version=$(grep -m1 '@version "' apps/skipper_core/mix.exs | cut -d'"' -f2)
+          published() { curl -sf "https://hex.pm/api/packages/$1/releases/$version" >/dev/null; }
+          for app in skipper_core skipper_ex_unit skipper_espec; do
+            if published "$app"; then echo "$app $version already on Hex, skipping"; continue; fi
+            if [ "$app" != skipper_core ]; then
+              for i in $(seq 1 20); do published skipper_core && break; echo "waiting for skipper_core $version on Hex…"; sleep 30; done
+              published skipper_core || { echo "::error::skipper_core $version is not on Hex yet (approve the staged release, then re-run)"; exit 1; }
+            fi
+            (cd "apps/$app" && mix deps.get && mix hex.publish --yes)
+          done
